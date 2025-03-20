@@ -176,7 +176,7 @@ def get_oil_points_column_a():
 
 # 處理來自 LINE 的消息
 @app.route("/callback", methods=['POST'])
-def callback():
+def callback(request):
     print(f"Version Code: {version_code}")
     
     signature = request.headers['X-Line-Signature']
@@ -216,79 +216,38 @@ def handle_message(event):
         question = user_input.replace("問題:", "", 1).strip()
         print(f"Looking for solution to question: '{question}'")
         
-
         # 使用新的函數查找 E 欄的解決方式
         solution = find_solution_by_question(question)
         
         if solution:
-            #CC回傳可能問題
-            reply = create_flex_message("相似問題", solution, item_type="question")
-
-            # #CC回傳多解
-            # reply_contents = [
-            #     TextComponent(text="解決方式", weight="bold", size="lg", margin="md")
-            # ]
-
-            # # 迭代 solution 列表，並為每個解決方案建立 TextComponent
-            # for sol in solution:
-            #     reply_contents.append(
-            #         TextComponent(text=sol, size="sm", color="#6A5ACD", wrap=True, margin="md")
-            #     )
-            #     reply_contents.append(SeparatorComponent(margin="md"))  # 添加分隔符
-
-            # reply_contents.append(
-            #     TextComponent(
-            #         text=" 返回問題分類",
-            #         weight="bold",
-            #         color="#228B22",
-            #         wrap=True,
-            #         margin="md",
-            #         action=MessageAction(
-            #             label="返回問題分類",
-            #             text="請選擇問題分類"
-            #         )
-            #     )
-            # )
-
-            # reply = FlexSendMessage(
-            #     alt_text="多個解決方式",  # 修改 alt_text
-            #     contents=BubbleContainer(
-            #         body=BoxComponent(
-            #             layout="vertical",
-            #             contents=reply_contents,
-            #             padding_all="xl"
-            #         )
-            #     )
-            # )
-            #CC回傳最佳解
-            # # 只顯示解決方式，不再顯示問題描述
-            # reply_contents = [
-            #     TextComponent(text="解決方式", weight="bold", size="lg", margin="md"),
-            #     TextComponent(text=solution, size="sm", color="#6A5ACD", wrap=True, margin="md"),
-            #     SeparatorComponent(margin="md"),
-            #     TextComponent(
-            #         text="🔙 返回問題分類",
-            #         weight="bold",
-            #         color="#228B22",
-            #         wrap=True,
-            #         margin="md",
-            #         action=MessageAction(
-            #             label="返回問題分類",
-            #             text="請選擇問題分類"
-            #         )
-            #     )
-            # ]
+            # 只顯示解決方式，不再顯示問題描述
+            reply_contents = [
+                TextComponent(text="解決方式", weight="bold", size="lg", margin="md"),
+                TextComponent(text=solution, size="sm", color="#6A5ACD", wrap=True, margin="md"),
+                SeparatorComponent(margin="md"),
+                TextComponent(
+                    text="🔙 返回問題分類",
+                    weight="bold",
+                    color="#228B22",
+                    wrap=True,
+                    margin="md",
+                    action=MessageAction(
+                        label="返回問題分類",
+                        text="請選擇問題分類"
+                    )
+                )
+            ]
             
-            # reply = FlexSendMessage(
-            #     alt_text="解決方式",
-            #     contents=BubbleContainer(
-            #         body=BoxComponent(
-            #             layout="vertical",
-            #             contents=reply_contents,
-            #             padding_all="xl"
-            #         )
-            #     )
-            # )
+            reply = FlexSendMessage(
+                alt_text="解決方式",
+                contents=BubbleContainer(
+                    body=BoxComponent(
+                        layout="vertical",
+                        contents=reply_contents,
+                        padding_all="xl"
+                    )
+                )
+            )
             print(f"Displayed solution for question: {question}")
         else:
             reply = TextSendMessage(text="找不到該問題的解決方式。")
@@ -364,76 +323,14 @@ def find_solution_by_question(question_text):
         
         # 假設第一行是標題行
         # C 欄是索引 2，E 欄是索引 4
-
-        #CC
-        questions_in_sheet = [row[2].strip() for row in all_data[1:] if len(row) > 4]  # C 欄
-        answers_in_sheet = [row[4].strip() for row in all_data[1:] if len(row) > 4]   # E 欄
-        """使用關鍵字匹配 + LLM 進行最佳答案查找"""
-        best_match = None
-        best_match_score = 0
-
-        #1. 用 difflib 先篩選出可能相關的問題
-        keyword_matches = []
-        for i, question_in_sheet in enumerate(questions_in_sheet):
-            ratio = difflib.SequenceMatcher(None, question_text, question_in_sheet).ratio()
-            if ratio > 0.3:  # 設定 0.3 作為初步匹配門檻
-                keyword_matches.append((i, ratio))
+        for row in all_data[1:]:  # 跳過標題行
+            if len(row) > 4 and row[2].strip() == question_text.strip():  # 檢查 C 欄
+                solution = row[4].strip()  # 獲取 E 欄內容
+                print(f"Found solution for question '{question_text}': {solution}")
+                return solution
         
-        # 按相似度排序，最多只取前 100 筆來進行 LLM 相似度比對
-        keyword_matches = sorted(keyword_matches, key=lambda x: x[1], reverse=True)[:100]
-        print(f"keywords={keyword_matches}")
-
-        ###CC方案一:只找最佳解
-        # #2. 讓 LLM 只處理這些篩選後的問題
-        # for i, _ in keyword_matches:
-        #     question_in_sheets = questions_in_sheet[i]
-        #     similarity_score = cached_llm_similarity(question_text, question_in_sheets)
-
-        #     #更新最佳匹配
-        #     if similarity_score > best_match_score:
-        #         best_match_score = similarity_score
-        #         best_match = answers_in_sheet[i]
-
-        # # 3. 如果最佳相似度 > 0.7，返回答案
-        # if best_match and best_match_score > 0.7:
-        #     print(f"找到相似問題！相似度：{best_match_score}，答案：{best_match}")
-        #     return best_match
-        # else:
-        #     print(f"找不到高相似度問題，最佳相似度：{best_match_score}")
-        #     return None
-
-        ##CC方案二:找出可能解
-        # 2. 讓 LLM 只處理這些篩選後的問題
-        similar_matches = []  # 儲存所有符合相似度的結果
-
-        for i, _ in keyword_matches:
-            question_in_sheets = questions_in_sheet[i]
-            similarity_score = cached_llm_similarity(question_text, question_in_sheets)
-            print(f"{question_text}pk{question_in_sheets}={similarity_score}")
-            # 如果相似度 > 0.5，儲存結果
-            if similarity_score > 0.5:
-              similar_matches.append({
-                  "問題描述": questions_in_sheet[i],
-                  "答案": answers_in_sheet[i]
-              })
-
-        # 3. 列印所有符合條件的結果
-        if similar_matches:
-          for match in similar_matches:
-              print(f"找到相似問題！問題描述：{match['問題描述']}，答案：{match['答案']}")
-          return similar_matches  # 返回包含問題描述和答案的字典列表
-        else:
-            print(f"找不到高相似度問題。")
-            return None
-        ##CC原本的方式
-        # for row in all_data[1:]:  # 跳過標題行
-        #     if len(row) > 4 and row[2].strip() == question_text.strip():  # 檢查 C 欄
-        #         solution = row[4].strip()  # 獲取 E 欄內容
-        #         print(f"Found solution for question '{question_text}': {solution}")
-        #         return solution
-        
-        # print(f"No solution found for question '{question_text}'")
-        # return None
+        print(f"No solution found for question '{question_text}'")
+        return None
     except Exception as e:
         print(f"Error in find_solution_by_question: {str(e)}")
         return None
@@ -481,7 +378,7 @@ def get_questions_by_category(category):
         print(f"Error in get_questions_by_category: {str(e)}")
         return []
 
-#找對應到的解決方式
+#找主表對應到的解決方式
 def find_question_from_main_table(question_text):
   try:
       # 獲取完整的工作表數據
@@ -509,25 +406,6 @@ def find_question_from_main_table(question_text):
       keyword_matches = sorted(keyword_matches, key=lambda x: x[1], reverse=True)[:100]
       print(f"keywords={keyword_matches}")
 
-      ###CC方案一:只找最佳解
-      # #2. 讓 LLM 只處理這些篩選後的問題
-      # for i, _ in keyword_matches:
-      #     question_in_sheets = questions_in_sheet[i]
-      #     similarity_score = cached_llm_similarity(question_text, question_in_sheets)
-
-      #     #更新最佳匹配
-      #     if similarity_score > best_match_score:
-      #         best_match_score = similarity_score
-      #         best_match = answers_in_sheet[i]
-
-      # # 3. 如果最佳相似度 > 0.7，返回答案
-      # if best_match and best_match_score > 0.7:
-      #     print(f"找到相似問題！相似度：{best_match_score}，答案：{best_match}")
-      #     return best_match
-      # else:
-      #     print(f"找不到高相似度問題，最佳相似度：{best_match_score}")
-      #     return None
-
       ##CC方案二:找出可能解
       # 2. 讓 LLM 只處理這些篩選後的問題
       similar_matches = []  # 儲存所有符合相似度的結果
@@ -540,34 +418,61 @@ def find_question_from_main_table(question_text):
           if similarity_score > 0.5:
             similar_matches.append({
                 "問題描述": questions_in_sheet[i],
-                "答案": answers_in_sheet[i]
+                "解決方式": answers_in_sheet[i]
             })
 
       # 3. 列印所有符合條件的結果
       if similar_matches:
         for match in similar_matches:
-            print(f"找到相似問題！問題描述：{match['問題描述']}，答案：{match['答案']}")
+            print(f"找到相似問題！問題描述：{match['問題描述']}，解決方式：{match['解決方式']}")
         return similar_matches  # 返回包含問題描述和答案的字典列表
       else:
           print(f"找不到高相似度問題。")
           return None
-      ##CC原本的方式
-      # for row in all_data[1:]:  # 跳過標題行
-      #     if len(row) > 4 and row[2].strip() == question_text.strip():  # 檢查 C 欄
-      #         solution = row[4].strip()  # 獲取 E 欄內容
-      #         print(f"Found solution for question '{question_text}': {solution}")
-      #         return solution
-      
-      # print(f"No solution found for question '{question_text}'")
-      # return None
+
   except Exception as e:
       print(f"Error in find_solution_by_question: {str(e)}")
       return None
   return
+#找中油點數表對應到的解決方式
+def find_question_from_points_table(keywords):
+  keywords_list = [kw.lower().strip() for kw in keywords.split()]
+  results_points = []
+  try:
+      points_ws = sheet.worksheet('title', '中油點數')
+      print("Found '中油點數' worksheet.")
+      records_points = points_ws.get_all_records()
+      results_points = [
+          {
+              '問題描述': str(row['問題描述']),
+              '解決方式': str(row['解決方式'])
+          }
+          for row in records_points
+          if '問題描述' in row and '解決方式' in row
+          and any(keyword in str(row['問題描述']).lower() or keyword in str(row['解決方式']).lower() for keyword in keywords_list)
+      ]
+      print(f"Search results from '中油點數' worksheet for '{keywords}': {results_points}")
+      
+  except pygsheets.WorksheetNotFound:
+      print("中油點數 worksheet not found.")
+  return results_points
 # 搜尋問題描述或解決方案
 def search_by_AI(question):
-  main_question = find_question_from_response_table(question)
-  return
+  # 定義結果列表
+  combined_results = []
+  results_main = find_question_from_main_table(question)
+  if results_main is not None: 
+    combined_results.extend(results_main)
+  results_points = find_question_from_points_table(question)
+  if results_points is not None: 
+    combined_results.extend(results_points)
+  # 移除重複的結果（如果兩個工作表有重複的問題）
+  unique_results = {frozenset(item.items()): item for item in combined_results}.values()
+  combined_results = list(unique_results)
+
+  print(f"Combined and unique search results for '{question}': {combined_results}")
+  return combined_results
+
 
 # 搜尋問題描述或解決方案
 def search_by_keyword(keywords):
