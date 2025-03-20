@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 import pytz
 import threading
+import google.generativeai as genai
 
 # 設定 GMT+8 時區
 gmt_8 = pytz.timezone("Asia/Taipei")
@@ -19,11 +20,16 @@ app = Flask(__name__)
 version_code = "24.11.02.2222"
 print(f"Starting application - Version Code: {version_code}")
 
+gemini_api_key = os.getenv('GEMINI_API_KEY')
+# 初始化 Gemini API
+genai.configure(api_key=gemini_api_key)
+
 # 設定LINE機器人和Google Sheets API
 line_bot_api = LineBotApi(os.environ.get('CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.environ.get('CHANNEL_SECRET'))
-gc = pygsheets.authorize(service_account_file='./credentials.json')
-sheet = gc.open_by_url('https://docs.google.com/spreadsheets/d/1U-C4LvkMKuybwckanHkD8FJoEB0f4D0dPxu8D54jEMI/')
+#CC
+# gc = pygsheets.authorize(service_account_file='./credentials.json')
+# sheet = gc.open_by_url('https://docs.google.com/spreadsheets/d/1U-C4LvkMKuybwckanHkD8FJoEB0f4D0dPxu8D54jEMI/')
 
 # 獲取 "熱門排行" 工作表中的前5個問題，並從主工作表獲取完整的問題描述
 def get_top_questions():
@@ -210,6 +216,7 @@ def handle_message(event):
         question = user_input.replace("問題:", "", 1).strip()
         print(f"Looking for solution to question: '{question}'")
         
+
         # 使用新的函數查找 E 欄的解決方式
         solution = find_solution_by_question(question)
         
@@ -300,14 +307,46 @@ def find_solution_by_question(question_text):
         
         # 假設第一行是標題行
         # C 欄是索引 2，E 欄是索引 4
+
+        #CC
+        #  1. 使用 LLM 搜尋相關問題
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        best_match = None
+        best_match_score = 0
         for row in all_data[1:]:  # 跳過標題行
-            if len(row) > 4 and row[2].strip() == question_text.strip():  # 檢查 C 欄
-                solution = row[4].strip()  # 獲取 E 欄內容
-                print(f"Found solution for question '{question_text}': {solution}")
-                return solution
+            if len(row) > 4:
+                question_in_sheets = row[2].strip()  # C 欄的問題描述
+
+                # 使用 LLM 計算問題的相似度
+                prompt = f"請判斷以下兩個問題的相似度，並返回一個 0 到 1 之間的數字，1 代表完全相同，0 代表完全不同：\n問題1：{question_text}\n問題2：{question_in_sheets}\n相似度："
+                response = model.generate_content(prompt)
+
+                try:
+                    similarity_score = float(response.text)
+                except ValueError:
+                    similarity_score = 0
+
+                # 更新最佳匹配
+                if similarity_score > best_match_score:
+                    best_match_score = similarity_score
+                    best_match = row
+
+        # 2. 如果找到相似度足夠高的問題，則返回答案
+        if best_match and best_match_score > 0.7:  # 設定相似度閾值
+            solution = best_match[4].strip()  # 獲取 E 欄內容 (解決方式)
+            print(f"在 Google Sheets 中找到相似問題，相似度：{best_match_score}，答案：{solution}")
+            return solution
+        else:
+            print(f"在 Google Sheets 中找不到相似問題，最佳相似度：{best_match_score}")
+            return None
+        # for row in all_data[1:]:  # 跳過標題行
+        #     if len(row) > 4 and row[2].strip() == question_text.strip():  # 檢查 C 欄
+        #         solution = row[4].strip()  # 獲取 E 欄內容
+        #         print(f"Found solution for question '{question_text}': {solution}")
+        #         return solution
         
-        print(f"No solution found for question '{question_text}'")
-        return None
+        # print(f"No solution found for question '{question_text}'")
+        # return None
     except Exception as e:
         print(f"Error in find_solution_by_question: {str(e)}")
         return None
