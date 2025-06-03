@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: tsc-bot
+    env: python
+    plan: free
+    buildCommand: ""
+    startCommand: gunicorn tscbot:app
