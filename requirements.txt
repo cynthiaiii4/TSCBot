@@ -1,0 +1,10 @@
+flask
+line-bot-sdk
+pygsheets
+google-generativeai
+sentence-transformers
+rank-bm25
+jieba
+supabase
+numpy
+pytz

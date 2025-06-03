@@ -1,17 +1,15 @@
 import os
-from flask import Flask, request, abort
+from flask import Flask, abort, request
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import *
 import pygsheets
-import re
 from datetime import datetime
 import pytz
 import threading
 import google.generativeai as genai
 import time
 import numpy as np
-# from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 import jieba
 
@@ -22,7 +20,7 @@ timestamp = datetime.now(gmt_8).strftime("%Y-%m-%d %H:%M:%S")
 app = Flask(__name__)
 
 # 設定版本代碼
-version_code = "25.04.05.2222"
+version_code = "30.05.2025"
 print(f"Starting application - Version Code: {version_code}")
 
 gemini_api_key = os.getenv('GEMINI_API_KEY')
@@ -33,8 +31,38 @@ generation_model = genai.GenerativeModel('gemini-2.0-flash')
 # 設定LINE機器人和Google Sheets API
 line_bot_api = LineBotApi(os.environ.get('LINE_BOT_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.environ.get('LINE_BOT_CHANNEL_SECRET'))
-gc = pygsheets.authorize(service_account_file='service_account_key.json')
-sheet = gc.open_by_url('https://docs.google.com/spreadsheets/d/1WSgGzCDKBlzKPPIAqQhKOn2GK_xQ6Y2TZHjEiWDrOVM/')
+credentials = os.environ.get('CREDENTIALS')
+# 使用 JSON 字串授權
+gc = pygsheets.authorize(service_account_json=credentials)
+sheet = gc.open_by_url(os.environ.get('GOOGLESHEET_URL'))
+
+#設定來源
+ALLOWED_DESTINATION = os.environ.get("ALLOWED_DESTINATION")
+#設定db
+
+# import json
+# from google.cloud import firestore
+# from google.oauth2 import service_account
+
+# def get_firestore_client_from_env():
+#     firestore_json = os.getenv("FIRESTORE")
+#     if not firestore_json:
+#         raise ValueError("FIRESTORE environment variable is not set.")
+
+#     cred_info = json.loads(firestore_json)
+#     credentials = service_account.Credentials.from_service_account_info(cred_info)
+#     return firestore.Client(credentials=credentials, project=cred_info["project_id"])
+
+# db = get_firestore_client_from_env()
+
+from supabase import create_client
+import os
+
+# 從環境變數讀取 Supabase 資訊
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 
 #取得主要問題
@@ -72,12 +100,13 @@ def get_model():
 # 將問句轉換為向量
 question_embeddings = get_model().encode(questions_in_sheet)
 
-#TODO:建立同義詞字典(放到google sheet讀取)
-synonym_list = [
-    ["無法連線", "離線", "網路斷線", "連不上"],
-]
+#讀取同義詞字典
+syn_ws = sheet.worksheet('title', '同義詞')
+synonym_rows = syn_ws.get_all_values()
+
 synonym_dict = {}
-for synonyms in synonym_list:
+for row in synonym_rows:
+    synonyms = [word.strip() for word in row if word.strip() != ""]
     for word in synonyms:
         synonym_dict[word] = set(synonyms) - {word}  # 除了自己以外的詞都是同義詞
 
@@ -105,7 +134,7 @@ def retrieve_top_n(query, n=2, threshold=5, high_threshold=10):
       #替換查詢詞中的同義詞
       expanded_query = expand_query(query)
       # BM25 排序
-      tokenized_query = list(jieba.cut(query))
+      tokenized_query = list(jieba.cut(expanded_query))
       bm25_scores = bm25.get_scores(tokenized_query)
 
       # Sentence Transformers 相似度計算
@@ -132,13 +161,39 @@ def retrieve_top_n(query, n=2, threshold=5, high_threshold=10):
       esult = []
       if len(high_score_indices) >= 2:
           # 如果有兩個或以上高分結果，返回前2個
-          result = [(questions_in_sheet[i], answers_in_sheet[i]) for i in high_score_indices[:2]]
+          result = [
+            {
+                "question": questions_in_sheet[i],
+                "answer": answers_in_sheet[i],
+                "bm25_score": float(bm25_scores[i]),
+                "semantic_score": float(semantic_scores[i]),
+                "combined_score": float(combined_scores[i])
+            }
+
+            for i in high_score_indices[:2]
+
+        ]
           # 在新執行緒中記錄問題
           thread = threading.Thread(target=record_question_for_answer, args=(questions_in_sheet[high_score_indices[0]],))
           thread.start()
       else:
           # 如果沒有或只有一個高分結果，只返回最高分的一個
-          result = [(questions_in_sheet[sorted_indices[0]], answers_in_sheet[sorted_indices[0]])]
+
+          i = sorted_indices[0]
+
+          result = [{
+
+              "question": questions_in_sheet[i],
+
+              "answer": answers_in_sheet[i],
+
+              "bm25_score": float(bm25_scores[i]),
+
+              "semantic_score": float(semantic_scores[i]),
+
+              "combined_score": float(combined_scores[i])
+
+          }]
           # 在新執行緒中記錄問題
           thread = threading.Thread(target=record_question_for_answer, args=(questions_in_sheet[sorted_indices[0]],))
           thread.start()
@@ -155,7 +210,8 @@ def reply_by_LLM(finalanswer,model):
     ##條件
     1.口氣禮貌親切簡潔
     2.若finalanswer為空[]，則回覆:此問題目前找不到合適解答，請聯絡積慧幫忙協助
-    3.不要解釋以上回覆條件，直接回覆答案
+    3.若finalanswer不為空[]，最後請換行後加一句:若此答案無法解決您問題，請換個問題再問一次或是聯絡積慧幫忙協助
+    4.不要解釋以上回覆條件，直接回覆答案
     """
     answer_in_human = model.generate_content(prompt)
     return answer_in_human
@@ -183,17 +239,31 @@ def extract_chinese_results_new(response):
     except (AttributeError, IndexError, UnicodeError):
         return ""
 
-#找出最近似問題並用LLM回答
+
 def find_closest_question_and_llm_reply(query):
+
   try:
     top_matches = retrieve_top_n(query)
-    result = reply_by_LLM(top_matches,generation_model)
+    if not top_matches:
+          return {
+              "answer": "目前找不到合適的答案，請再試一次或換個問法",
+              "top_matches": []
+          }
+    answers_only = [match["answer"] for match in top_matches]
+    result = reply_by_LLM(answers_only, generation_model)
     answer_to_line = extract_chinese_results_new(result)
-    return answer_to_line
-  except Exception as e:
-      print(f"Error in find_closest_question_and_llm_reply: {str(e)}")
-      return "此問題目前找不到合適解答，請聯絡積慧幫忙協助"
+    return {
+            "answer": answer_to_line,
+            "top_matches": top_matches
+        }
 
+  except Exception as e:
+
+      print(f"Error in find_closest_question_and_llm_reply: {str(e)}")
+      return {
+            "answer": "此問題目前找不到合適解答，請聯絡積慧幫忙協助",
+            "top_matches": []
+        }
 
 # 獲取 "熱門排行" 工作表中的前5個問題，並從主工作表獲取完整的問題描述
 def get_top_questions():
@@ -302,13 +372,28 @@ def get_oil_points_column_a():
 
 # 處理來自 LINE 的消息
 @app.route("/callback", methods=['POST'])
-def callback(request):
+def callback():
     print(f"Version Code: {version_code}")
     
-    signature = request.headers['X-Line-Signature']
+    # 驗證 signature
+    signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
     print("Request body:", body)
+     # 驗證 destination 是否為允許的 LINE 官方帳號
 
+    try:
+        payload = json.loads(body)
+        if payload.get("destination") != ALLOWED_DESTINATION:
+            print("Invalid destination.")
+            return "Forbidden", 403
+
+    except Exception as e:
+        print("Payload parsing error:", e)
+        return "Bad Request", 400
+
+
+
+    # 通過 destination 驗證後才處理 LINE 事件
     try:
         handler.handle(body, signature)
         print("Message handled successfully.")
@@ -322,7 +407,7 @@ def handle_message(event):
     user_input = event.message.text
     user_id = event.source.user_id
 
-    if user_input.startswith("知識寶典"):
+    if user_input.startswith("知識寶典") or user_input.startswith("@action:show_categories"):
         # 出現問題選單
         reply = create_category_and_common_features()
         print("Displayed category and common features message.")
@@ -384,24 +469,65 @@ def handle_message(event):
             reply = TextSendMessage(text="找不到該問題的解決方式。")
             print(f"No solution found for question: {question}")
 
-    elif user_input == "熱門詢問":
+    elif user_input == "熱門查詢":
         top_questions = get_top_questions()
         if top_questions:
-            reply = create_flex_message("熱門詢問 - Top 5 問題", top_questions, "question")
+            reply = create_flex_message("熱門查詢 - Top 5 問題", top_questions, "question")
         else:
             reply = TextSendMessage(text="目前沒有熱門排行記錄。")
         print("Displayed top 5 questions.")
 
-    elif user_input == "查詢中油點數":
+    elif user_input == "查中油點數":
         oil_points_message = get_oil_points_column_a()
         reply = TextSendMessage(text=oil_points_message)
         print("Displayed '中油兌換點數' column A.")
 
     else:
       try:
-        results = find_closest_question_and_llm_reply(user_input)
-        reply = TextSendMessage(text=results)
+        result_bundle = find_closest_question_and_llm_reply(user_input)
+        conversation_id = f"conv_{user_id}_{int(time.time())}"
+        reply = build_flex_response(result_bundle["answer"], conversation_id)
         print(f"Show LLM answer for question: {user_input}")
+        if result_bundle["top_matches"]:
+
+          top1 = result_bundle["top_matches"][0]
+
+        #   db.collection("conversations").add({
+
+        #       "conversation_id": conversation_id,
+
+        #       "user_id": user_id,
+
+        #       "question": user_input,
+
+        #       "answer": result_bundle["answer"],
+
+        #       "matched_question": top1["question"],
+
+        #       "bm25_score": top1["bm25_score"],
+
+        #       "semantic_score": top1["semantic_score"],
+
+        #       "combined_score": top1["combined_score"],
+
+        #       "model_version": version_code,
+
+        #       "timestamp": firestore.SERVER_TIMESTAMP
+
+        #   })
+        supabase.table("conversations").insert({
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "question": user_input,
+            "answer": result_bundle["answer"],
+            "matched_question": top1["question"],
+            "bm25_score": top1["bm25_score"],
+            "semantic_score": top1["semantic_score"],
+            "combined_score": top1["combined_score"],
+            "model_version": version_code,
+            "timestamp": datetime.now().isoformat()
+        }).execute()
+
       except Exception as e:
         print(f"Error in find_closest_question_and_llm_reply: {str(e)}")
         reply = TextSendMessage(text="機器人暫時無法使用，請聯絡積慧幫忙協助")
@@ -501,7 +627,7 @@ def create_flex_message(title, items, item_type="category", start_index=1):
         bubble_contents.append(SeparatorComponent(margin="md"))
         bubble_contents.append(TextComponent(
             text="🔙 問題分類", weight="bold", color="#228B22", wrap=True,
-            action=MessageAction(label="問題分類", text="請選擇問題分類")
+            action=MessageAction(label="問題分類", text="@action:show_categories")
         ))
 
         bubbles.append(BubbleContainer(body=BoxComponent(layout="vertical", contents=bubble_contents)))
@@ -509,6 +635,123 @@ def create_flex_message(title, items, item_type="category", start_index=1):
 
     print(f"Generated Flex Message with title '{title}' and {len(bubbles)} bubbles.")
     return FlexSendMessage(alt_text="請選擇分類或問題描述", contents=CarouselContainer(contents=bubbles)) if bubbles else TextSendMessage(text="找不到符合條件的資料。")
+
+from linebot.models import FlexSendMessage
+
+
+
+def build_flex_response(answer, conversation_id):
+
+    return FlexSendMessage(
+
+        alt_text="回覆與回饋",
+
+        contents={
+
+            "type": "bubble",
+
+            "body": {
+
+                "type": "box",
+
+                "layout": "vertical",
+
+                "contents": [
+
+                    {"type": "text", "text": answer, "wrap": True},
+
+                    {
+
+                        "type": "box",
+
+                        "layout": "horizontal",
+
+                        "margin": "md",
+
+                        "contents": [
+
+                            {
+
+                                "type": "button",
+
+                                "action": {
+
+                                    "type": "postback",
+
+                                    "label": "👍",
+
+                                    "data": f"feedback=thumbs_up&conv_id={conversation_id}"
+
+                                },
+
+                                "height": "sm",
+
+                                "flex": 1
+
+                            },
+
+                            {
+
+                                "type": "button",
+
+                                "action": {
+
+                                    "type": "postback",
+
+                                    "label": "👎",
+
+                                    "data": f"feedback=thumbs_down&conv_id={conversation_id}"
+
+                                },
+
+                                "height": "sm",
+
+                                "flex": 1
+
+                            }
+
+                        ]
+
+                    }
+
+                ]
+
+            }
+
+        }
+
+    )
+
+
+
+@handler.add(PostbackEvent)
+
+def handle_postback(event):
+    data = event.postback.data
+    params = dict(x.split("=") for x in data.split("&"))
+    feedback_type = params.get("feedback")
+    conversation_id = params.get("conv_id")
+    user_id = event.source.user_id
+    # db.collection("feedback").add({
+    #     "user_id": user_id,
+    #     "conversation_id": conversation_id,
+    #     "feedback_type": feedback_type,
+    #     "timestamp": firestore.SERVER_TIMESTAMP
+
+    # })
+    supabase.table("feedback").insert({
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "feedback_type": feedback_type,
+        "timestamp": datetime.now().isoformat()
+    }).execute()
+
+
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text="感謝您的回饋 🙏")
+    )
+
 
 # 運行應用
 if __name__ == "__main__":
