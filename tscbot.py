@@ -337,8 +337,8 @@ def find_solution_by_click_question(question_text):
         all_data = main_ws.get_all_values()
         
         for row in all_data[1:]:
-            if len(row) > 4 and row[2].strip() == question_text.strip():
-                solution = row[4].strip()
+            if len(row) > 3 and row[2].strip() == question_text.strip():
+                solution = row[3].strip()
                 print(f"Found solution for question '{question_text}': {solution}")
                 return solution
         
